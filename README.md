@@ -128,7 +128,7 @@ sudo ./install.sh --local
 
 ## Информацию, как работает WDTT, узнайте в официальном репозитории. [proxy-turn-vk-android](https://github.com/amurcanov/proxy-turn-vk-android)
 
-# Требования
+## Требования
 
 - Ubuntu 20.04+
 - Root-доступ
