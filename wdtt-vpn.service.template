@@ -1,0 +1,14 @@
+[Unit]
+Description=WDTT VPN Server Core
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/wdtt
+ExecStartPre=/sbin/sysctl -p /etc/sysctl.d/99-wdtt.conf
+ExecStartPre=/bin/bash -c 'MAIN_IFACE=$$(ip route | grep default | awk '\''{print $$5}'\'' | head -n1); iptables -t nat -C POSTROUTING -o "\$\$MAIN_IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "\$\$MAIN_IFACE" -j MASQUERADE'
+ExecStart=/usr/local/bin/wdtt-server -config-dir /etc/wdtt -listen 0.0.0.0:{{DTLS_PORT}} -wg-port {{WG_PORT}}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

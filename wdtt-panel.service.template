@@ -1,0 +1,15 @@
+[Unit]
+Description=WDTT VPN Control Panel
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wdtt-panel
+Environment="PANEL_USER={{PANEL_USER}}"
+Environment="PANEL_PASS={{PANEL_PASS}}"
+Environment="PANEL_PORT={{PANEL_PORT}}"
+ExecStart=/opt/wdtt-panel/venv/bin/python3 app.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
