@@ -11,7 +11,16 @@ if [ ! -f "./wdtt-server" ]; then
   exit 1
 fi
 
-SERVER_IP=$(curl -s https://icanhazip.com || echo "your-server-ip")
+# передан ли аргумент --local при запуске скрипта
+if [ "$1" == "--local" ]; then
+  SERVER_IP=$(hostname -I | awk '{print $1}')
+  LOCAL_MODE=true
+  echo "--- Запущено в локальном режиме (LAN) ---"
+else
+  SERVER_IP=$(curl -s https://icanhazip.com || echo "your-server-ip")
+  LOCAL_MODE=false
+  echo "--- Запущено в стандартном режиме (VPS) ---"
+fi
 
 echo "=== Установка WDTT VPN (из репозитория) ==="
 read -p "Логин администратора веб-панели [default: admin]: " PANEL_USER
