@@ -18,7 +18,7 @@ if [ ! -f "./wdtt-server" ]; then
   exit 1
 fi
 
-# Проверка наличия шаблонов и необходимых файлов в текущей директории
+# Проверка наличия шаблонов и необходимых файлов
 REQUIRED_FILES=("app.py" "99-wdtt.conf" "wdtt-panel.service.template" "wdtt-vpn.service.template")
 for file in "${REQUIRED_FILES[@]}"; do
   if [ ! -f "./$file" ]; then
@@ -38,6 +38,40 @@ init_vars() {
     LOCAL_MODE=false
     echo -e "${YELLOW}--- Запущено в стандартном режиме (VPS) ---${NC}"
   fi
+}
+
+# --- ПРОВЕРКА СВОБОДНЫХ ПОРТОВ ---
+is_port_busy() {
+  local port=$1
+  if ss -tulpn 2>/dev/null | awk '{print $5}' | grep -qE ":$port$"; then
+    return 0 # Порт занят
+  else
+    return 1 # Порт свободен
+  fi
+}
+
+# Функция безопасного ввода порта с проверкой занятости
+get_free_port() {
+  local var_name=$1
+  local default_val=$2
+  local prompt_msg=$3
+  local user_val
+
+  while true; do
+    read -p "$prompt_msg [default: $default_val]: " user_val
+    user_val=${user_val:-$default_val}
+    
+    if is_port_busy "$user_val"; then
+      echo -e "${RED}Внимание: Порт $user_val уже используется другим процессом в системе!${NC}"
+      read -p "Вы уверены, что хотите использовать именно его? (y/N): " CONFIRM_PORT
+      if [[ "$CONFIRM_PORT" =~ ^[Yy]$ ]]; then
+        break
+      fi
+    else
+      break
+    fi
+  done
+  eval "$var_name=\$user_val"
 }
 
 # --- ФУНКЦИИ РЕЗЕРВНОГО КОПИРОВАНИЯ ---
@@ -103,17 +137,34 @@ check_status() {
 perform_installation() {
   local preserve_data=$1
   local alongside_wg=$2
+  local SAFE_MODE=false
 
   if [ "$preserve_data" = true ]; then
     backup_data
   fi
 
-  # Остановка старых служб перед копированием файлов во избежание конфликтов записи
+  # Остановка старых служб перед копированием файлов
   systemctl stop wdtt-panel wdtt-vpn 2>/dev/null || true
+
+  # Специфика выбора Безопасного режима при установке рядом с WireGuard
+  if [ "$alongside_wg" = true ]; then
+    echo -e "\n${BLUE}=== Настройка совместимости с WireGuard ===${NC}"
+    echo -e "Безопасный режим предотвращает затирание текущих правил вашего файрвола (UFW/Firewalld)"
+    echo -e "и не устанавливает пакет автосохранения правил (iptables-persistent)."
+    read -p "Включить безопасный режим установки? (Y/n): " opt_safe
+    opt_safe=${opt_safe:-Y}
+    if [[ "$opt_safe" =~ ^[Yy]$ ]]; then
+      SAFE_MODE=true
+      echo -e "${GREEN}Безопасный режим активирован!${NC}"
+    else
+      SAFE_MODE=false
+      echo -e "${YELLOW}Безопасный режим отключен. Установка продолжится в обычном режиме.${NC}"
+    fi
+  fi
 
   echo -e "\n=== Настройка параметров установки ==="
 
-  # Сбор данных для Веб-панели (с попыткой восстановить старые значения по умолчанию)
+  # Сбор данных для Веб-панели (с попыткой восстановить старые значения)
   local default_user="admin"
   local default_pass=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 12)
   local default_panel_port="8080"
@@ -121,7 +172,6 @@ perform_installation() {
   local default_wg_port="56001"
   local default_tun_port="9000"
 
-  # Если выбран режим обновления и есть старый файл сервиса, пробуем вытащить данные оттуда
   if [ "$preserve_data" = true ] && [ -f /etc/systemd/system/wdtt-panel.service ]; then
     local ext_user=$(grep -oP '(PANEL_USER=|--user\s+)\K\S+' /etc/systemd/system/wdtt-panel.service | tr -d '"' | head -n1)
     local ext_pass=$(grep -oP '(PANEL_PASS=|--pass\s+)\K\S+' /etc/systemd/system/wdtt-panel.service | tr -d '"' | head -n1)
@@ -138,34 +188,22 @@ perform_installation() {
   read -p "Пароль веб-панели [default: $default_pass]: " PANEL_PASS
   PANEL_PASS=${PANEL_PASS:-$default_pass}
 
-  read -p "Порт веб-панели [default: $default_panel_port]: " PANEL_PORT
-  PANEL_PORT=${PANEL_PORT:-$default_panel_port}
+  # Интерактивный опрос портов с автоматической проверкой на занятость в системе
+  get_free_port PANEL_PORT "$default_panel_port" "Порт веб-панели"
+  get_free_port DTLS_PORT "$default_dtls_port" "UDP-порт для DTLS"
+  get_free_port WG_PORT "$default_wg_port" "Внутренний порт WireGuard"
+  get_free_port TUN_PORT "$default_tun_port" "Локальный порт клиента (TUN)"
 
-  # Особенности настройки рядом с обычным WireGuard
-  if [ "$alongside_wg" = true ]; then
-    echo -e "${YELLOW}\n[Режим совместимости с WireGuard]"
-    echo -e "Убедитесь, что порты не конфликтуют с вашим стандартным WireGuard (обычно порт 51820).${NC}"
-    if command -v wg &> /dev/null && wg show &> /dev/null; then
-      echo -e "${YELLOW}Обнаружен активный WireGuard. Занятые порты:${NC}"
-      wg show | grep "listening port" || echo "Порты Wireguard не определены."
-    fi
-    echo ""
-  fi
-
-  read -p "UDP-порт для DTLS [default: $default_dtls_port]: " DTLS_PORT
-  DTLS_PORT=${DTLS_PORT:-$default_dtls_port}
-
-  read -p "Внутренний порт WireGuard [default: $default_wg_port]: " WG_PORT
-  WG_PORT=${WG_PORT:-$default_wg_port}
-
-  read -p "Локальный порт клиента (TUN) [default: $default_tun_port]: " TUN_PORT
-  TUN_PORT=${TUN_PORT:-$default_tun_port}
-
-  # 1. Установка зависимостей (использование DEBIAN_FRONTEND для предотвращения зависания при настройке iptables-persistent)
+  # 1. Установка зависимостей
   echo -e "\n[1/6] Установка пакетов системы..."
   apt-get update
   export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y python3 python3-pip python3-venv iptables curl jq iptables-persistent
+  
+  local pkgs="python3 python3-pip python3-venv iptables curl jq"
+  if [ "$SAFE_MODE" = false ]; then
+    pkgs="$pkgs iptables-persistent"
+  fi
+  apt-get install -y $pkgs
 
   # 2. Копирование готового бинарника
   echo -e "\n[2/6] Копирование исполняемого файла ядра..."
@@ -203,11 +241,15 @@ DB_EOF
 
   MAIN_IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
   if [ -n "$MAIN_IFACE" ]; then
-    # Проверка, чтобы не добавлять дубликат правила MASQUERADE
+    # Добавляем правило MASQUERADE
     if ! iptables -t nat -C POSTROUTING -o "$MAIN_IFACE" -j MASQUERADE 2>/dev/null; then
       iptables -t nat -A POSTROUTING -o "$MAIN_IFACE" -j MASQUERADE
     fi
-    netfilter-persistent save
+    
+    # В безопасном режиме пропускаем автосохранение правил файрвола на диск
+    if [ "$SAFE_MODE" = false ]; then
+      netfilter-persistent save
+    fi
   fi
 
   # 5. Настройка веб-панели управления
@@ -233,6 +275,13 @@ DB_EOF
   echo -e "Панель управления доступна по адресу:"
   echo -e "http://$SERVER_IP:$PANEL_PORT"
   echo -e "Учетные данные: $PANEL_USER / $PANEL_PASS"
+  
+  if [ "$SAFE_MODE" = true ]; then
+    echo -e "\n${YELLOW}ВНИМАНИЕ (Безопасный режим):${NC}"
+    echo -e "Для сохранения работоспособности VPN после перезагрузки сервера"
+    echo -e "добавьте следующее правило в ваш брандмауэр вручную (например, в UFW или Firewalld):"
+    echo -e "${GREEN}iptables -t nat -A POSTROUTING -o $MAIN_IFACE -j MASQUERADE${NC}"
+  fi
   echo -e "=================================================="
   read -p "Нажмите Enter для выхода..."
 }
@@ -244,7 +293,7 @@ show_menu() {
   echo -e "${BLUE}            Управление установкой WDTT VPN         ${NC}"
   echo -e "${BLUE}==================================================${NC}"
   echo -e "1) Обычная установка"
-  echo -e "2) Установить рядом с обычным WireGuard"
+  echo -e "2) Установить рядом с обычным WireGuard (с безопасным режимом)"
   echo -e "3) Переустановить без потери пользователей, ключей и хэшей"
   echo -e "4) Полностью переустановить (чистая установка)"
   echo -e "5) Посмотреть статус сервисов"
@@ -265,7 +314,7 @@ while true; do
       break
       ;;
     2)
-      echo -e "\n--- Запуск установки в режиме совместимости с WireGuard ---"
+      echo -e "\n--- Запуск установки рядом с WireGuard ---"
       perform_installation false true
       break
       ;;
